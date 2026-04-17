@@ -24,8 +24,7 @@ func TestLifecycle_GracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Start the loops
-	go k.watchLoop(ctx)
-	go k.pollLoop(ctx)
+	go k.run(ctx)
 
 	// Let them run for a bit
 	time.Sleep(200 * time.Millisecond)
@@ -34,17 +33,8 @@ func TestLifecycle_GracefulShutdown(t *testing.T) {
 	start := time.Now()
 	cancel()
 
-	// Wait for a reasonable amount of time for goroutines to exit.
-	// We can't easily "wait" for the goroutines to finish without adding WaitGroups
-	// to the production code, but we can check if they don't hang.
-
-	// To actually verify they exited, we would need a way to track active goroutines.
-	// For now, we'll just ensure they don't block the test.
-
 	done := make(chan struct{})
 	go func() {
-		// This is a bit of a hack since we can't wait on the internal goroutines directly.
-		// But if they were hanging, this test would time out.
 		time.Sleep(100 * time.Millisecond)
 		close(done)
 	}()

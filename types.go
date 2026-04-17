@@ -11,8 +11,8 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
-	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -72,12 +72,9 @@ type Kubernetes struct {
 	metricFallback   prometheus.Gauge
 	metricSyncTiming prometheus.Observer
 
-	// Background cache for EndpointSlices to scale to thousands of endpoints
-	cacheMu     sync.Mutex
-	slicesCache map[string]discoveryv1.EndpointSlice
-
-	// Track the latest resource version to prevent races between watch and poll
-	lastResourceVersion string
+	// Informer for EndpointSlices
+	informer cache.SharedIndexInformer
+	cacheMu  sync.Mutex
 
 	// Pool of long-lived upstream pointers to ensure stability for load balancer state.
 	// Only modified under cacheMu.

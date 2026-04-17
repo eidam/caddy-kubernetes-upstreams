@@ -6,195 +6,117 @@ import (
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	discoveryv1 "k8s.io/api/discovery/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
 )
 
 func (k *Kubernetes) run(ctx context.Context) {
-	// Initial sync
-	k.rebuild(ctx)
-
-	go k.watchLoop(ctx)
-	go k.pollLoop(ctx)
+	// Start the informer
+	if k.Watch != nil && *k.Watch {
+		k.startInformer(ctx)
+	} else {
+		// Degraded polling logic if watch is disabled
+		// We can still use the informer without watching by setting a very high resync
+		// but standard informer always does list+watch. If Watch is false, we probably
+		// need a simple poll loop. Let's just warn for now, since informer is the primary path.
+		k.logger.Warn("Watch is disabled, falling back to basic polling mode")
+		go k.fallbackPollLoop(ctx)
+	}
 }
 
-func (k *Kubernetes) watchLoop(ctx context.Context) {
-	if k.Watch == nil || !*k.Watch {
-		return
+func (k *Kubernetes) startInformer(ctx context.Context) {
+	labelSelector := "kubernetes.io/service-name=" + k.Service
+
+	listWatch := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			options.LabelSelector = labelSelector
+			return k.client.DiscoveryV1().EndpointSlices(k.Namespace).List(ctx, options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.LabelSelector = labelSelector
+			return k.client.DiscoveryV1().EndpointSlices(k.Namespace).Watch(ctx, options)
+		},
 	}
 
-	// Debounce timer for coalescing rapid watch events (e.g. during a large rollout)
+	k.informer = cache.NewSharedIndexInformer(
+		listWatch,
+		&discoveryv1.EndpointSlice{},
+		time.Duration(k.PollInterval),
+		cache.Indexers{},
+	)
+
+	// Debounce timer for coalescing rapid watch events
 	const debounceDuration = 100 * time.Millisecond
 	var debounceTimer *time.Timer
 	updatePending := false
 
-	// Backoff for reconnection failures
-	backoff := time.Second
+	triggerUpdate := func() {
+		k.cacheMu.Lock()
+		defer k.cacheMu.Unlock()
+
+		if !updatePending {
+			updatePending = true
+			if debounceTimer == nil {
+				debounceTimer = time.AfterFunc(debounceDuration, func() {
+					k.cacheMu.Lock()
+					k.syncSnapshot()
+					updatePending = false
+					k.cacheMu.Unlock()
+				})
+			} else {
+				debounceTimer.Reset(debounceDuration)
+			}
+		}
+	}
+
+	k.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			triggerUpdate()
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			triggerUpdate()
+		},
+		DeleteFunc: func(obj interface{}) {
+			triggerUpdate()
+		},
+	})
+
+	go k.informer.Run(ctx.Done())
+
+	// Wait for the initial cache sync
+	go func() {
+		if cache.WaitForCacheSync(ctx.Done(), k.informer.HasSynced) {
+			select {
+			case <-k.ready:
+			default:
+				close(k.ready)
+			}
+		}
+	}()
+}
+
+func (k *Kubernetes) fallbackPollLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(k.PollInterval))
+	defer ticker.Stop()
+
+	// Initial fetch
+	k.pollSingle(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-		}
-
-		k.cacheMu.Lock()
-		rv := k.lastResourceVersion
-		k.cacheMu.Unlock()
-
-		if c := k.logger.Check(zapcore.DebugLevel, "starting watch"); c != nil {
-			c.Write(
-				zap.String("namespace", k.Namespace),
-				zap.String("service", k.Service),
-				zap.String("resource_version", rv),
-			)
-		}
-
-		w, err := k.client.DiscoveryV1().EndpointSlices(k.Namespace).Watch(ctx, metav1.ListOptions{
-			LabelSelector:   "kubernetes.io/service-name=" + k.Service,
-			ResourceVersion: rv,
-		})
-		if err != nil {
-			k.metricErrors.Inc()
-			// If resource version is too old, we must perform a full list to re-sync.
-			// We reset backoff here because we are establishing a new "truth".
-			if errors.IsResourceExpired(err) || errors.IsGone(err) {
-				k.logger.Warn("watch resource version expired; forcing full re-sync",
-					zap.String("version", rv))
-				k.rebuild(ctx)
-				backoff = time.Second
-				continue
-			}
-
-			// If watch is forbidden (RBAC), log once and stop the watch loop.
-			// The pollLoop will continue to provide eventual consistency.
-			if errors.IsForbidden(err) {
-				k.logger.Warn("watch permission denied; falling back to periodic polling only",
-					zap.Error(err))
-				return
-			}
-
-			k.logger.Error("failed to start watch; backing off",
-				zap.Error(err),
-				zap.Duration("backoff", backoff))
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-				backoff *= 2
-				if backoff > time.Minute {
-					backoff = time.Minute
-				}
-				continue
-			}
-		}
-
-		// Successful connection: reset backoff
-		backoff = time.Second
-
-		// Run the watch event processing in a block to ensure w.Stop() is called via defer
-		// if we ever add an early return/break from inside the loop.
-		func() {
-			defer w.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case event, ok := <-w.ResultChan():
-					if !ok {
-						return
-					}
-
-					if event.Type == watch.Error {
-						k.metricErrors.Inc()
-						k.logger.Error("watch event error", zap.Any("object", event.Object))
-						return
-					}
-
-					// Handle Bookmark events to progress the ResourceVersion even when idle.
-					if event.Type == watch.Bookmark {
-						if meta, ok := event.Object.(metav1.Object); ok {
-							k.cacheMu.Lock()
-							if isNewer(meta.GetResourceVersion(), k.lastResourceVersion) {
-								k.lastResourceVersion = meta.GetResourceVersion()
-							}
-							k.cacheMu.Unlock()
-						}
-						continue
-					}
-
-					obj, ok := event.Object.(*discoveryv1.EndpointSlice)
-					if !ok {
-						continue
-					}
-
-					if c := k.logger.Check(zapcore.DebugLevel, "watch event received"); c != nil {
-						c.Write(
-							zap.String("type", string(event.Type)),
-							zap.String("name", obj.Name),
-							zap.String("version", obj.ResourceVersion),
-						)
-					}
-
-					k.cacheMu.Lock()
-					if !isNewer(obj.ResourceVersion, k.lastResourceVersion) {
-						k.cacheMu.Unlock()
-						continue
-					}
-					k.lastResourceVersion = obj.ResourceVersion
-
-					if k.slicesCache == nil {
-						k.slicesCache = make(map[string]discoveryv1.EndpointSlice)
-					}
-
-					switch event.Type {
-					case watch.Added, watch.Modified:
-						k.slicesCache[obj.Name] = *obj
-					case watch.Deleted:
-						delete(k.slicesCache, obj.Name)
-					}
-
-					if !updatePending {
-						updatePending = true
-						if debounceTimer == nil {
-							debounceTimer = time.AfterFunc(debounceDuration, func() {
-								k.cacheMu.Lock()
-								k.syncSnapshot()
-								updatePending = false
-								k.cacheMu.Unlock()
-							})
-						} else {
-							debounceTimer.Reset(debounceDuration)
-						}
-					}
-					k.cacheMu.Unlock()
-				}
-			}
-		}()
-
-		// Small delay if the watch closed instantly to avoid tight loop
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
+			k.pollSingle(ctx)
 		}
 	}
 }
 
-func (k *Kubernetes) rebuild(ctx context.Context) {
-	if c := k.logger.Check(zapcore.DebugLevel, "rebuilding upstreams (full poll)"); c != nil {
-		c.Write(
-			zap.String("namespace", k.Namespace),
-			zap.String("service", k.Service),
-		)
-	}
-
+func (k *Kubernetes) pollSingle(ctx context.Context) {
 	start := time.Now()
-	// Use a timeout for the API call to avoid hanging
 	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -205,10 +127,11 @@ func (k *Kubernetes) rebuild(ctx context.Context) {
 		k.metricErrors.Inc()
 		k.logger.Error("failed to list endpointslices", zap.Error(err))
 
-		// If we are already stale and failed this poll, log a warning about fallback.
+		// Check for staleness fallback
 		if k.MaxStaleness > 0 {
 			snap := k.upstreams.Load()
 			if snap != nil && time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness) {
+				k.cacheMu.Lock()
 				if !k.isFallingBack {
 					k.metricFallback.Set(1)
 					k.logger.Warn("using service fallback; API data is stale",
@@ -216,46 +139,24 @@ func (k *Kubernetes) rebuild(ctx context.Context) {
 						zap.Duration("max_staleness", time.Duration(k.MaxStaleness)))
 					k.isFallingBack = true
 				}
+				k.cacheMu.Unlock()
 			}
 		}
 		return
 	}
+
 	k.metricSyncTiming.Observe(time.Since(start).Seconds())
 
 	k.cacheMu.Lock()
 	defer k.cacheMu.Unlock()
 
-	// 1. New data: perform full update
-	if isNewer(slices.ResourceVersion, k.lastResourceVersion) {
-		k.lastResourceVersion = slices.ResourceVersion
-		k.slicesCache = make(map[string]discoveryv1.EndpointSlice)
-		for _, s := range slices.Items {
-			k.slicesCache[s.Name] = s
-		}
-		k.syncSnapshot()
-
-		if c := k.logger.Check(zapcore.DebugLevel, "rebuild complete (new version)"); c != nil {
-			c.Write(
-				zap.String("version", slices.ResourceVersion),
-				zap.Int("slices", len(slices.Items)),
-			)
-		}
-	} else if slices.ResourceVersion == k.lastResourceVersion {
-		// 2. Same data: treat as a health heartbeat
-		k.refreshTimestamp()
-		if c := k.logger.Check(zapcore.DebugLevel, "rebuild complete (heartbeat)"); c != nil {
-			c.Write(zap.String("version", slices.ResourceVersion))
-		}
-	} else {
-		// 3. Stale data: ignore
-		if c := k.logger.Check(zapcore.DebugLevel, "skipping stale poll result"); c != nil {
-			c.Write(
-				zap.String("list_version", slices.ResourceVersion),
-				zap.String("current_version", k.lastResourceVersion),
-			)
-		}
-		return
+	items := make([]discoveryv1.EndpointSlice, len(slices.Items))
+	for i, s := range slices.Items {
+		items[i] = s
 	}
+
+	upstreams := k.buildUpstreams(items)
+	k.storeSnapshot(upstreams)
 
 	// Signal ready on first successful rebuild
 	select {
@@ -266,35 +167,23 @@ func (k *Kubernetes) rebuild(ctx context.Context) {
 }
 
 func (k *Kubernetes) syncSnapshot() {
-	items := make([]discoveryv1.EndpointSlice, 0, len(k.slicesCache))
-	for _, s := range k.slicesCache {
-		items = append(items, s)
+	if k.informer == nil {
+		return
+	}
+
+	start := time.Now()
+
+	objs := k.informer.GetStore().List()
+	items := make([]discoveryv1.EndpointSlice, 0, len(objs))
+	for _, obj := range objs {
+		if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
+			items = append(items, *slice)
+		}
 	}
 
 	upstreams := k.buildUpstreams(items)
-	now := time.Now()
-
-	k.upstreams.Store(&kubernetesSnapshot{
-		upstreams:   upstreams,
-		LastUpdated: now,
-	})
-	k.metricEndpoints.Set(float64(len(upstreams)))
-
-	if k.isFallingBack {
-		k.metricFallback.Set(0)
-		k.logger.Info("recovered from service fallback; API synchronization restored")
-		k.isFallingBack = false
-	}
-}
-
-func (k *Kubernetes) refreshTimestamp() {
-	snap := k.upstreams.Load()
-	if snap == nil {
-		k.syncSnapshot()
-		return
-	}
-	// Re-use the existing immutable upstream list, just update the timestamp
-	k.storeSnapshot(snap.upstreams)
+	k.storeSnapshot(upstreams)
+	k.metricSyncTiming.Observe(time.Since(start).Seconds())
 }
 
 func (k *Kubernetes) storeSnapshot(upstreams []*reverseproxy.Upstream) {

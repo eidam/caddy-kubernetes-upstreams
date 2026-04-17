@@ -7,20 +7,6 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 )
 
-// isNewer returns true if newRV is strictly newer than oldRV.
-// Kubernetes resource versions are numeric strings.
-func isNewer(newRV, oldRV string) bool {
-	if oldRV == "" {
-		return true
-	}
-	n, err1 := strconv.ParseUint(newRV, 10, 64)
-	o, err2 := strconv.ParseUint(oldRV, 10, 64)
-	if err1 != nil || err2 != nil {
-		return newRV > oldRV
-	}
-	return n > o
-}
-
 func (k *Kubernetes) resolvePort(ports []discoveryv1.EndpointPort) (int32, bool) {
 	if len(ports) == 0 {
 		return 0, false

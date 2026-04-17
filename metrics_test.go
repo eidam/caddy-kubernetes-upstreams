@@ -39,10 +39,8 @@ func TestMetrics_Values(t *testing.T) {
 		},
 	}
 
-	k.cacheMu.Lock()
-	k.slicesCache = map[string]discoveryv1.EndpointSlice{"s1": slices[0]}
-	k.syncSnapshot()
-	k.cacheMu.Unlock()
+	upstreams := k.buildUpstreams(slices)
+	k.storeSnapshot(upstreams)
 
 	val = getGaugeValue(k.metricEndpoints)
 	if val != 2 {
