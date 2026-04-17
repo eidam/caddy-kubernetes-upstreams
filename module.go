@@ -128,7 +128,6 @@ func (k *Kubernetes) provisionMetrics() {
 	k.metricEndpoints = upstreamsEndpoints.With(k.metricLabels)
 	k.metricErrors = upstreamsErrors.With(k.metricLabels)
 	k.metricFallback = upstreamsFallbackActive.With(k.metricLabels)
-	k.metricSyncTiming = upstreamsSyncSeconds.With(k.metricLabels)
 
 	// Ensure metrics start at 0
 	k.metricEndpoints.Set(0)
@@ -350,13 +349,5 @@ var (
 		Subsystem: "kubernetes_upstreams",
 		Name:      "fallback_active",
 		Help:      "Whether the module is currently routing via the Service Fallback (1) or fine-grained pods (0).",
-	}, []string{"namespace", "service", "port"})
-
-	upstreamsSyncSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "caddy",
-		Subsystem: "kubernetes_upstreams",
-		Name:      "sync_seconds",
-		Help:      "Histogram of the time taken for a full rebuild (API List call).",
-		Buckets:   prometheus.DefBuckets,
 	}, []string{"namespace", "service", "port"})
 )

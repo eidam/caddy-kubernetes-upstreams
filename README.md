@@ -108,7 +108,6 @@ This module exposes Prometheus metrics via Caddy's standard metrics endpoint (us
 | `caddy_kubernetes_upstreams_endpoints` | Gauge | Number of active pods discovered. |
 | `caddy_kubernetes_upstreams_fallback_active` | Gauge | `1` if currently routing via Service Fallback, `0` if healthy. |
 | `caddy_kubernetes_upstreams_api_errors_total` | Counter | Total number of failed Kubernetes API calls. |
-| `caddy_kubernetes_upstreams_sync_seconds` | Histogram | Time taken for a full background synchronization. |
 
 ## Service Fallback
 

@@ -70,7 +70,6 @@ type Kubernetes struct {
 	metricEndpoints  prometheus.Gauge
 	metricErrors     prometheus.Counter
 	metricFallback   prometheus.Gauge
-	metricSyncTiming prometheus.Observer
 
 	// Informer for EndpointSlices
 	informer cache.SharedIndexInformer

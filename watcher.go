@@ -50,11 +50,19 @@ func (k *Kubernetes) startInformer(ctx context.Context) {
 	listWatch := &cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 			options.LabelSelector = labelSelector
-			return k.client.DiscoveryV1().EndpointSlices(k.Namespace).List(ctx, options)
+			res, err := k.client.DiscoveryV1().EndpointSlices(k.Namespace).List(ctx, options)
+			if err != nil {
+				k.metricErrors.Inc()
+			}
+			return res, err
 		},
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 			options.LabelSelector = labelSelector
-			return k.client.DiscoveryV1().EndpointSlices(k.Namespace).Watch(ctx, options)
+			res, err := k.client.DiscoveryV1().EndpointSlices(k.Namespace).Watch(ctx, options)
+			if err != nil {
+				k.metricErrors.Inc()
+			}
+			return res, err
 		},
 	}
 
@@ -64,6 +72,13 @@ func (k *Kubernetes) startInformer(ctx context.Context) {
 		time.Duration(k.PollInterval),
 		cache.Indexers{},
 	)
+
+	if err := k.informer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+		k.metricErrors.Inc()
+		k.logger.Error("informer watch error", zap.Error(err))
+	}); err != nil {
+		k.logger.Warn("failed to set watch error handler", zap.Error(err))
+	}
 
 	// Debounce timer for coalescing rapid watch events
 	const debounceDuration = 100 * time.Millisecond
@@ -133,7 +148,6 @@ func (k *Kubernetes) fallbackPollLoop(ctx context.Context) {
 }
 
 func (k *Kubernetes) pollSingle(ctx context.Context) {
-	start := time.Now()
 	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -162,8 +176,6 @@ func (k *Kubernetes) pollSingle(ctx context.Context) {
 		return
 	}
 
-	k.metricSyncTiming.Observe(time.Since(start).Seconds())
-
 	k.cacheMu.Lock()
 	defer k.cacheMu.Unlock()
 
@@ -188,8 +200,6 @@ func (k *Kubernetes) syncSnapshot() {
 		return
 	}
 
-	start := time.Now()
-
 	objs := k.informer.GetStore().List()
 	items := make([]discoveryv1.EndpointSlice, 0, len(objs))
 	for _, obj := range objs {
@@ -200,7 +210,6 @@ func (k *Kubernetes) syncSnapshot() {
 
 	upstreams := k.buildUpstreams(items)
 	k.storeSnapshot(upstreams)
-	k.metricSyncTiming.Observe(time.Since(start).Seconds())
 }
 
 func (k *Kubernetes) storeSnapshot(upstreams []*reverseproxy.Upstream) {
