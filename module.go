@@ -86,7 +86,7 @@ func (k *Kubernetes) Provision(ctx caddy.Context) error {
 	if k.MaxStaleness > 0 {
 		// Use a short timeout for the fallback initialization to avoid hanging startup
 		fallbackCtx, cancel := context.WithTimeout(k.ctx, defaultFallbackTimeout)
-		k.initFallbackUpstreams(fallbackCtx)
+		k.updateFallbackUpstreams(fallbackCtx)
 		cancel()
 	}
 
@@ -165,9 +165,11 @@ func (k *Kubernetes) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, er
 	// Degraded mode: fallback if stale (MaxStaleness > 0 enables this)
 	if k.MaxStaleness > 0 {
 		if time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness) {
-			if len(k.fallbackUpstreams) > 0 {
-				upstreams := make([]*reverseproxy.Upstream, len(k.fallbackUpstreams))
-				copy(upstreams, k.fallbackUpstreams)
+			fallbackPtr := k.fallbackUpstreams.Load()
+			if fallbackPtr != nil && len(*fallbackPtr) > 0 {
+				fallback := *fallbackPtr
+				upstreams := make([]*reverseproxy.Upstream, len(fallback))
+				copy(upstreams, fallback)
 				return upstreams, nil
 			}
 		}
@@ -180,7 +182,7 @@ func (k *Kubernetes) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, er
 	return upstreams, nil
 }
 
-func (k *Kubernetes) initFallbackUpstreams(ctx context.Context) {
+func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 	ns := k.Namespace
 	svcName := k.Service
 
@@ -214,28 +216,31 @@ func (k *Kubernetes) initFallbackUpstreams(ctx context.Context) {
 		}
 
 		if port > 0 {
-			k.fallbackUpstreams = []*reverseproxy.Upstream{{
+			fallback := []*reverseproxy.Upstream{{
 				Dial: fmt.Sprintf("%s:%d", host, port),
 			}}
+			k.fallbackUpstreams.Store(&fallback)
 			k.logger.Info("initialized API-based fallback upstream",
-				zap.String("addr", k.fallbackUpstreams[0].Dial))
+				zap.String("addr", fallback[0].Dial))
 			return
 		}
 	}
 
 	// Fallback to DNS if API failed or port not resolved
+	var fallback []*reverseproxy.Upstream
 	if resolvedPort != "" {
-		k.fallbackUpstreams = []*reverseproxy.Upstream{{
+		fallback = []*reverseproxy.Upstream{{
 			Dial: fmt.Sprintf("%s:%s", dnsFallback, resolvedPort),
 		}}
 	} else {
 		// We don't even have a port, fallback is partial but better than nothing
-		k.fallbackUpstreams = []*reverseproxy.Upstream{{
+		fallback = []*reverseproxy.Upstream{{
 			Dial: dnsFallback,
 		}}
 	}
+	k.fallbackUpstreams.Store(&fallback)
 	k.logger.Warn("initialized DNS-based fallback upstream",
-		zap.String("addr", k.fallbackUpstreams[0].Dial),
+		zap.String("addr", fallback[0].Dial),
 		zap.Error(err))
 }
 

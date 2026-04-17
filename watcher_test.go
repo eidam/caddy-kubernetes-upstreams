@@ -11,10 +11,9 @@ import (
 func TestGetUpstreams_ServiceFallback(t *testing.T) {
 	k := &Kubernetes{
 		MaxStaleness: caddy.Duration(time.Minute),
-		fallbackUpstreams: []*reverseproxy.Upstream{
-			{Dial: "fallback:80"},
-		},
 	}
+	fallback := []*reverseproxy.Upstream{{Dial: "fallback:80"}}
+	k.fallbackUpstreams.Store(&fallback)
 
 	// 1. Fresh state: should return normal upstreams
 	freshSnap := &kubernetesSnapshot{

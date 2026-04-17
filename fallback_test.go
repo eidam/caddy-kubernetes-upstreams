@@ -10,7 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestInitFallbackUpstreams(t *testing.T) {
+func TestUpdateFallbackUpstreams(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
@@ -92,13 +92,19 @@ func TestInitFallbackUpstreams(t *testing.T) {
 				logger:    zap.NewNop(),
 			}
 
-			k.initFallbackUpstreams(ctx)
+			k.updateFallbackUpstreams(ctx)
 
-			if len(k.fallbackUpstreams) != 1 {
-				t.Fatalf("Expected 1 fallback upstream, got %d", len(k.fallbackUpstreams))
+			fallbackPtr := k.fallbackUpstreams.Load()
+			if fallbackPtr == nil {
+				t.Fatalf("Expected fallback upstreams to be populated")
 			}
-			if k.fallbackUpstreams[0].Dial != tt.wantAddr {
-				t.Errorf("Fallback Dial = %v, want %v", k.fallbackUpstreams[0].Dial, tt.wantAddr)
+			fallback := *fallbackPtr
+
+			if len(fallback) != 1 {
+				t.Fatalf("Expected 1 fallback upstream, got %d", len(fallback))
+			}
+			if fallback[0].Dial != tt.wantAddr {
+				t.Errorf("Fallback Dial = %v, want %v", fallback[0].Dial, tt.wantAddr)
 			}
 		})
 	}

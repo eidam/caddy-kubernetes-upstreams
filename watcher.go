@@ -14,6 +14,23 @@ import (
 )
 
 func (k *Kubernetes) run(ctx context.Context) {
+	if k.MaxStaleness > 0 {
+		go func() {
+			ticker := time.NewTicker(time.Duration(k.PollInterval))
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					updateCtx, cancel := context.WithTimeout(ctx, defaultFallbackTimeout)
+					k.updateFallbackUpstreams(updateCtx)
+					cancel()
+				}
+			}
+		}()
+	}
+
 	// Start the informer
 	if k.Watch != nil && *k.Watch {
 		k.startInformer(ctx)

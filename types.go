@@ -62,7 +62,7 @@ type Kubernetes struct {
 
 	client            kubernetes.Interface
 	upstreams         atomic.Pointer[kubernetesSnapshot]
-	fallbackUpstreams []*reverseproxy.Upstream
+	fallbackUpstreams atomic.Pointer[[]*reverseproxy.Upstream]
 	logger            *zap.Logger
 
 	// Metrics
