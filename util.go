@@ -1,0 +1,66 @@
+package kubernetes
+
+import (
+	"strconv"
+
+	"go.uber.org/zap"
+	discoveryv1 "k8s.io/api/discovery/v1"
+)
+
+// isNewer returns true if newRV is strictly newer than oldRV.
+// Kubernetes resource versions are numeric strings.
+func isNewer(newRV, oldRV string) bool {
+	if oldRV == "" {
+		return true
+	}
+	n, err1 := strconv.ParseUint(newRV, 10, 64)
+	o, err2 := strconv.ParseUint(oldRV, 10, 64)
+	if err1 != nil || err2 != nil {
+		return newRV > oldRV
+	}
+	return n > o
+}
+
+func (k *Kubernetes) resolvePort(ports []discoveryv1.EndpointPort) (int32, bool) {
+	if len(ports) == 0 {
+		return 0, false
+	}
+
+	if k.Port == "" {
+		// If no port specified, and there's only one port, use it.
+		// If there are multiple ports, pick the first one and warn.
+		if len(ports) > 1 {
+			portName := "<unnamed>"
+			if ports[0].Name != nil {
+				portName = *ports[0].Name
+			}
+			k.logger.Warn("multiple ports available but none specified; picking the first one",
+				zap.String("service", k.Service),
+				zap.String("picked", portName))
+		}
+		if ports[0].Port != nil {
+			return *ports[0].Port, true
+		}
+		return 0, false
+	}
+
+	// Try numeric first
+	if pInt, err := strconv.Atoi(k.Port); err == nil {
+		for _, p := range ports {
+			if p.Port != nil && *p.Port == int32(pInt) {
+				return *p.Port, true
+			}
+		}
+	}
+
+	// Try as name
+	for _, p := range ports {
+		if p.Name != nil && *p.Name == k.Port {
+			if p.Port != nil {
+				return *p.Port, true
+			}
+		}
+	}
+
+	return 0, false
+}
