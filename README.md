@@ -61,7 +61,6 @@ reverse_proxy {
         port 8080                # Optional: number or name
         kubeconfig ~/.kube/config # Optional: path to kubeconfig file
         
-        watch true               # Real-time updates via Watch API (default: true)
         poll_interval 15s        # Periodic safety sync (default: 15s)
         
         max_staleness 1m         # Service Fallback threshold (default: 1m)
@@ -82,7 +81,6 @@ reverse_proxy {
 		"service": "my-service",
 		"namespace": "default",
 		"port": "http",
-		"watch": true,
 		"strict_init": false,
 		"max_staleness": "1m"
 	}

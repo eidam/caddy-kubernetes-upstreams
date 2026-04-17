@@ -20,7 +20,6 @@ const (
 	defaultMaxStaleness       = 1 * time.Minute
 	defaultStartupPollTimeout = 10 * time.Second
 	defaultFallbackTimeout    = 5 * time.Second
-	defaultWatch              = true
 )
 
 // Kubernetes is a Caddy dynamic upstream module that discovers backend endpoints for a Kubernetes Service.
@@ -36,9 +35,6 @@ type Kubernetes struct {
 
 	// The port number or name to use. If not specified, and the Service has only one port, it will be used automatically.
 	Port string `json:"port,omitempty"`
-
-	// Enable near real-time updates via the Kubernetes Watch API. Defaults to true.
-	Watch *bool `json:"watch,omitempty"`
 
 	// The interval at which to poll the Kubernetes API as a fallback. Default: 15s.
 	PollInterval caddy.Duration `json:"poll_interval,omitempty"`

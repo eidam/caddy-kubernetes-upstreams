@@ -73,10 +73,6 @@ func (k *Kubernetes) Provision(ctx caddy.Context) error {
 	if k.StartupPollTimeout <= 0 {
 		k.StartupPollTimeout = caddy.Duration(defaultStartupPollTimeout)
 	}
-	if k.Watch == nil {
-		watch := defaultWatch
-		k.Watch = &watch
-	}
 
 	err := k.initKubernetesClient()
 	if err != nil {
@@ -298,9 +294,6 @@ func (k *Kubernetes) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				k.Kubeconfig = d.Val()
 			case "port":
 				k.Port = d.Val()
-			case "watch":
-				watch := d.Val() == "true"
-				k.Watch = &watch
 			case "strict_init":
 				k.StrictInit = d.Val() == "true"
 			case "poll_interval", "startup_poll_timeout", "max_staleness":

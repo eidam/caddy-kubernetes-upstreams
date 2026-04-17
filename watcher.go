@@ -32,16 +32,7 @@ func (k *Kubernetes) run(ctx context.Context) {
 	}
 
 	// Start the informer
-	if k.Watch != nil && *k.Watch {
-		k.startInformer(ctx)
-	} else {
-		// Degraded polling logic if watch is disabled
-		// We can still use the informer without watching by setting a very high resync
-		// but standard informer always does list+watch. If Watch is false, we probably
-		// need a simple poll loop. Let's just warn for now, since informer is the primary path.
-		k.logger.Warn("Watch is disabled, falling back to basic polling mode")
-		go k.fallbackPollLoop(ctx)
-	}
+	k.startInformer(ctx)
 }
 
 func (k *Kubernetes) startInformer(ctx context.Context) {
@@ -128,71 +119,6 @@ func (k *Kubernetes) startInformer(ctx context.Context) {
 			}
 		}
 	}()
-}
-
-func (k *Kubernetes) fallbackPollLoop(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(k.PollInterval))
-	defer ticker.Stop()
-
-	// Initial fetch
-	k.pollSingle(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			k.pollSingle(ctx)
-		}
-	}
-}
-
-func (k *Kubernetes) pollSingle(ctx context.Context) {
-	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	slices, err := k.client.DiscoveryV1().EndpointSlices(k.Namespace).List(listCtx, metav1.ListOptions{
-		LabelSelector: "kubernetes.io/service-name=" + k.Service,
-	})
-	if err != nil {
-		k.metricErrors.Inc()
-		k.logger.Error("failed to list endpointslices", zap.Error(err))
-
-		// Check for staleness fallback
-		if k.MaxStaleness > 0 {
-			snap := k.upstreams.Load()
-			if snap != nil && time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness) {
-				k.cacheMu.Lock()
-				if !k.isFallingBack {
-					k.metricFallback.Set(1)
-					k.logger.Warn("using service fallback; API data is stale",
-						zap.Duration("staleness", time.Since(snap.LastUpdated)),
-						zap.Duration("max_staleness", time.Duration(k.MaxStaleness)))
-					k.isFallingBack = true
-				}
-				k.cacheMu.Unlock()
-			}
-		}
-		return
-	}
-
-	k.cacheMu.Lock()
-	defer k.cacheMu.Unlock()
-
-	items := make([]discoveryv1.EndpointSlice, len(slices.Items))
-	for i, s := range slices.Items {
-		items[i] = s
-	}
-
-	upstreams := k.buildUpstreams(items)
-	k.storeSnapshot(upstreams)
-
-	// Signal ready on first successful rebuild
-	select {
-	case <-k.ready:
-	default:
-		close(k.ready)
-	}
 }
 
 func (k *Kubernetes) syncSnapshot() {
