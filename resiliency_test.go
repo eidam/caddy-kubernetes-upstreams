@@ -63,6 +63,7 @@ func TestProvision_StrictInit(t *testing.T) {
 func TestGetUpstreams_ImmediateFallback(t *testing.T) {
 	k := &Kubernetes{
 		MaxStaleness: caddy.Duration(time.Minute),
+		logger:       zap.NewNop(),
 	}
 	fallback := []*reverseproxy.Upstream{{Dial: "fallback:80"}}
 	k.fallbackUpstreams.Store(&fallback)

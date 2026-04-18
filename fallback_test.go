@@ -91,6 +91,7 @@ func TestUpdateFallbackUpstreams(t *testing.T) {
 				client:    client,
 				logger:    zap.NewNop(),
 			}
+			k.provisionMetrics()
 
 			k.updateFallbackUpstreams(ctx)
 

@@ -6,14 +6,17 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
+	"go.uber.org/zap"
 )
 
 func TestGetUpstreams_ServiceFallback(t *testing.T) {
 	k := &Kubernetes{
 		MaxStaleness: caddy.Duration(time.Minute),
+		logger:       zap.NewNop(),
 	}
 	fallback := []*reverseproxy.Upstream{{Dial: "fallback:80"}}
 	k.fallbackUpstreams.Store(&fallback)
+	k.provisionMetrics()
 
 	// 1. Fresh state: should return normal upstreams
 	freshSnap := &kubernetesSnapshot{

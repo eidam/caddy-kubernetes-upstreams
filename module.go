@@ -20,11 +20,11 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(Kubernetes{})
+	caddy.RegisterModule(new(Kubernetes))
 }
 
 // CaddyModule returns the Caddy module information.
-func (Kubernetes) CaddyModule() caddy.ModuleInfo {
+func (*Kubernetes) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.reverse_proxy.upstreams.kubernetes",
 		New: func() caddy.Module { return new(Kubernetes) },
@@ -160,6 +160,10 @@ func (k *Kubernetes) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, er
 	// Degraded mode: fallback if stale (MaxStaleness > 0 enables this)
 	if k.MaxStaleness > 0 {
 		if time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness) {
+			if k.isFallingBack.CompareAndSwap(false, true) {
+				k.metricFallback.Set(1)
+				k.logger.Warn("service fallback active; API synchronization is stale")
+			}
 			fallbackPtr := k.fallbackUpstreams.Load()
 			if fallbackPtr != nil && len(*fallbackPtr) > 0 {
 				fallback := *fallbackPtr
@@ -187,6 +191,10 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 
 	// Try to get explicit ClusterIP from API
 	svc, err := k.client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+	if err != nil {
+		k.metricErrors.Inc()
+	}
+
 	if err == nil && svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
 		host := svc.Spec.ClusterIP
 		var port int32

@@ -62,21 +62,25 @@ type Kubernetes struct {
 	logger            *zap.Logger
 
 	// Metrics
-	metricLabels     prometheus.Labels
-	metricEndpoints  prometheus.Gauge
-	metricErrors     prometheus.Counter
-	metricFallback   prometheus.Gauge
+	metricLabels    prometheus.Labels
+	metricEndpoints prometheus.Gauge
+	metricErrors    prometheus.Counter
+	metricFallback  prometheus.Gauge
 
 	// Informer for EndpointSlices
 	informer cache.SharedIndexInformer
 	cacheMu  sync.Mutex
+
+	// Flag to track if a full rebuild is needed or just a timestamp refresh.
+	// Only modified under cacheMu.
+	needsRebuild bool
 
 	// Pool of long-lived upstream pointers to ensure stability for load balancer state.
 	// Only modified under cacheMu.
 	upstreamPool map[string]*reverseproxy.Upstream
 
 	// Track fallback state for logging purposes
-	isFallingBack bool
+	isFallingBack atomic.Bool
 
 	ready  chan struct{}
 	ctx    context.Context
