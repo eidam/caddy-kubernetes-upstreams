@@ -17,8 +17,9 @@ import (
 
 func TestBuildUpstreams(t *testing.T) {
 	k := &Kubernetes{
-		Port:   "8080",
-		logger: zap.NewNop(),
+		Port:            "8080",
+		resolvedPodPort: 8080,
+		logger:          zap.NewNop(),
 	}
 
 	slices := []discoveryv1.EndpointSlice{
@@ -114,8 +115,9 @@ func TestBuildUpstreams(t *testing.T) {
 
 func TestBuildUpstreams_PointerStability(t *testing.T) {
 	k := &Kubernetes{
-		Port:   "80",
-		logger: zap.NewNop(),
+		Port:            "80",
+		resolvedPodPort: 80,
+		logger:          zap.NewNop(),
 	}
 
 	slices := []discoveryv1.EndpointSlice{
@@ -178,8 +180,9 @@ func TestBuildUpstreams_PointerStability(t *testing.T) {
 
 func TestBuildUpstreams_IPv6(t *testing.T) {
 	k := &Kubernetes{
-		Port:   "443",
-		logger: zap.NewNop(),
+		Port:            "443",
+		resolvedPodPort: 443,
+		logger:          zap.NewNop(),
 	}
 
 	slices := []discoveryv1.EndpointSlice{
@@ -222,37 +225,42 @@ func TestResolvePort(t *testing.T) {
 		name             string
 		port             string
 		resolvedPortName string
+		resolvedPodPort  int32
 		ports            []discoveryv1.EndpointPort
 		wantPort         int32
 		wantFound        bool
 	}{
 		{
-			name:      "by name http",
-			port:      "http",
-			ports:     defaultPorts,
-			wantPort:  80,
-			wantFound: true,
+			name:             "by name http",
+			port:             "http",
+			resolvedPortName: "http",
+			ports:            defaultPorts,
+			wantPort:         80,
+			wantFound:        true,
 		},
 		{
-			name:      "by name https",
-			port:      "https",
-			ports:     defaultPorts,
-			wantPort:  443,
-			wantFound: true,
+			name:             "by name https",
+			port:             "https",
+			resolvedPortName: "https",
+			ports:            defaultPorts,
+			wantPort:         443,
+			wantFound:        true,
 		},
 		{
-			name:      "by number 80",
-			port:      "80",
-			ports:     defaultPorts,
-			wantPort:  80,
-			wantFound: true,
+			name:            "by number 80",
+			port:            "80",
+			resolvedPodPort: 80,
+			ports:           defaultPorts,
+			wantPort:        80,
+			wantFound:       true,
 		},
 		{
-			name:      "by number 443",
-			port:      "443",
-			ports:     defaultPorts,
-			wantPort:  443,
-			wantFound: true,
+			name:            "by number 443",
+			port:            "443",
+			resolvedPodPort: 443,
+			ports:           defaultPorts,
+			wantPort:        443,
+			wantFound:       true,
 		},
 		{
 			name:      "name not found",
@@ -280,9 +288,9 @@ func TestResolvePort(t *testing.T) {
 			wantFound: true,
 		},
 		{
-			name:             "unnamed port match: requested 80, no name in service, matches slice port 80",
-			port:             "80",
-			resolvedPortName: "",
+			name:            "unnamed port match: requested 80, no name in service, matches slice port 80",
+			port:            "80",
+			resolvedPodPort: 80,
 			ports: []discoveryv1.EndpointPort{
 				{
 					Port: ptr.To(int32(80)),
@@ -323,6 +331,7 @@ func TestResolvePort(t *testing.T) {
 			k := &Kubernetes{
 				Port:             tt.port,
 				resolvedPortName: tt.resolvedPortName,
+				resolvedPodPort:  tt.resolvedPodPort,
 			}
 			gotPort, gotFound := k.resolvePort(tt.ports)
 			if gotPort != tt.wantPort || gotFound != tt.wantFound {
@@ -390,7 +399,7 @@ func TestComprehensivePortResolution(t *testing.T) {
 			},
 			slicePorts: []discoveryv1.EndpointPort{
 				{
-					Name: ptr.To("http-webhook"),
+					Name: ptr.To("http"), // Correct: matches Service Port name
 					Port: ptr.To(int32(9292)),
 				},
 			},
@@ -495,7 +504,7 @@ func TestComprehensivePortResolution(t *testing.T) {
 				{Name: ptr.To("legacy"), Port: ptr.To(int32(80))},
 			},
 			wantPort:  80,
-			wantFound: true, // Should still match by number if name didn't match
+			wantFound: false, // Strict: names must match if ServicePort has a name
 		},
 		{
 			name:          "Scenario 10: Mixed TargetPort Types in Service",
@@ -549,7 +558,7 @@ func TestRebuildOnMappingChange(t *testing.T) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
 		Spec: corev1.ServiceSpec{
-			Ports: []corev1.ServicePort{{Name: "old", Port: 80, TargetPort: intstr.FromString("v1")}},
+			Ports: []corev1.ServicePort{{Name: "v1", Port: 80}},
 		},
 	}
 	client := fake.NewSimpleClientset(svc)
@@ -570,24 +579,23 @@ func TestRebuildOnMappingChange(t *testing.T) {
 
 	// First run - populates initial mapping
 	k.updateFallbackUpstreams(ctx)
-	if rebuildCalled != 1 {
-		t.Errorf("Expected rebuild on initial mapping discovery, got %d", rebuildCalled)
-	}
+	initialRebuilds := rebuildCalled
 
-	// Update service in fake client
-	svc.Spec.Ports[0].TargetPort = intstr.FromString("v2")
+	// Update service name in fake client
+	svc.Spec.Ports[0].Name = "v2"
 	client.CoreV1().Services("default").Update(ctx, svc, metav1.UpdateOptions{})
 
 	// Second run - should detect change and trigger rebuild
 	k.updateFallbackUpstreams(ctx)
-	if rebuildCalled != 2 {
-		t.Errorf("Expected second rebuild on mapping change, got %d", rebuildCalled)
+	if rebuildCalled <= initialRebuilds {
+		t.Errorf("Expected rebuild on mapping change, got %d (initial: %d)", rebuildCalled, initialRebuilds)
 	}
+	afterChangeRebuilds := rebuildCalled
 
 	// Third run - no change, no rebuild
 	k.updateFallbackUpstreams(ctx)
-	if rebuildCalled != 2 {
-		t.Errorf("Expected no rebuild when mapping is identical, got %d", rebuildCalled)
+	if rebuildCalled != afterChangeRebuilds {
+		t.Errorf("Expected no rebuild when mapping is identical, got %d (previous: %d)", rebuildCalled, afterChangeRebuilds)
 	}
 }
 

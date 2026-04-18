@@ -1,8 +1,6 @@
 package kubernetes
 
 import (
-	"strconv"
-
 	"go.uber.org/zap"
 	discoveryv1 "k8s.io/api/discovery/v1"
 )
@@ -12,9 +10,8 @@ func (k *Kubernetes) resolvePort(ports []discoveryv1.EndpointPort) (int32, bool)
 		return 0, false
 	}
 
+	// If no port specified, and there's only one port, use it.
 	if k.Port == "" {
-		// If no port specified, and there's only one port, use it.
-		// If there are multiple ports, pick the first one and warn.
 		if len(ports) > 1 {
 			portName := "<unnamed>"
 			if ports[0].Name != nil {
@@ -30,26 +27,23 @@ func (k *Kubernetes) resolvePort(ports []discoveryv1.EndpointPort) (int32, bool)
 		return 0, false
 	}
 
-	// Try as name (configured name, resolved Service port name, or resolved targetPort name)
-	// This takes precedence because if we resolved a numeric Service port to a name,
-	// we MUST use that name to find the correct port in the EndpointSlice (which
-	// might have a different numeric port if targetPort is used).
-	for _, p := range ports {
-		if p.Name != nil {
-			if *p.Name == k.Port ||
-				(k.resolvedPortName != "" && *p.Name == k.resolvedPortName) ||
-				(k.resolvedTargetPortName != "" && *p.Name == k.resolvedTargetPortName) {
+	// Try as name (either resolved Service port name, or resolved targetPort name)
+	if k.resolvedPortName != "" {
+		for _, p := range ports {
+			if p.Name != nil && *p.Name == k.resolvedPortName {
 				if p.Port != nil {
 					return *p.Port, true
 				}
 			}
 		}
+		// If the Service port is named, we MUST find that name in the EndpointSlice.
+		return 0, false
 	}
 
-	// Try numeric (either configured numeric port, or resolved numeric targetPort)
-	if pInt, err := strconv.Atoi(k.Port); err == nil {
+	// Try numeric (resolved numeric targetPort or matching numeric service port)
+	if k.resolvedPodPort != 0 {
 		for _, p := range ports {
-			if p.Port != nil && (*p.Port == int32(pInt) || (k.resolvedTargetPortNumber != 0 && *p.Port == k.resolvedTargetPortNumber)) {
+			if p.Port != nil && *p.Port == k.resolvedPodPort {
 				return *p.Port, true
 			}
 		}

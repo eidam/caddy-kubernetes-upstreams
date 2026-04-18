@@ -227,63 +227,50 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 
 	var port int32
 	var portName string
-	var targetPortName string
-	var targetPortNumber int32
+	var podPort int32
 
 	if err == nil && svc != nil {
-		// Resolve port details from Service
+		var matchedPort *corev1.ServicePort
 		if resolvedPort == "" {
 			if len(svc.Spec.Ports) == 1 {
-				p := svc.Spec.Ports[0]
-				port = p.Port
-				portName = p.Name
-				if p.TargetPort.Type == intstr.String {
-					targetPortName = p.TargetPort.StrVal
-				} else if p.TargetPort.Type == intstr.Int && p.TargetPort.IntVal != 0 {
-					targetPortNumber = p.TargetPort.IntVal
+				matchedPort = &svc.Spec.Ports[0]
+			}
+		} else if pInt, err := strconv.Atoi(resolvedPort); err == nil {
+			for i := range svc.Spec.Ports {
+				if svc.Spec.Ports[i].Port == int32(pInt) {
+					matchedPort = &svc.Spec.Ports[i]
+					break
 				}
 			}
 		} else {
-			if pInt, err := strconv.Atoi(resolvedPort); err == nil {
-				// Search by port number in Service
-				for _, p := range svc.Spec.Ports {
-					if p.Port == int32(pInt) {
-						port = p.Port
-						portName = p.Name
-						if p.TargetPort.Type == intstr.String {
-							targetPortName = p.TargetPort.StrVal
-						} else if p.TargetPort.Type == intstr.Int && p.TargetPort.IntVal != 0 {
-							targetPortNumber = p.TargetPort.IntVal
-						}
-						break
-					}
-				}
-			} else {
-				// Search by name in Service
-				for _, p := range svc.Spec.Ports {
-					if p.Name == resolvedPort {
-						port = p.Port
-						portName = p.Name
-						if p.TargetPort.Type == intstr.String {
-							targetPortName = p.TargetPort.StrVal
-						} else if p.TargetPort.Type == intstr.Int && p.TargetPort.IntVal != 0 {
-							targetPortNumber = p.TargetPort.IntVal
-						}
-						break
-					}
+			for i := range svc.Spec.Ports {
+				if svc.Spec.Ports[i].Name == resolvedPort {
+					matchedPort = &svc.Spec.Ports[i]
+					break
 				}
 			}
 		}
 
-		// Update resolved names for EndpointSlice matching
-		k.cacheMu.Lock()
-		changed := k.resolvedPortName != portName ||
-			k.resolvedTargetPortName != targetPortName ||
-			k.resolvedTargetPortNumber != targetPortNumber
+		if matchedPort != nil {
+			port = matchedPort.Port
+			portName = matchedPort.Name
+			if matchedPort.TargetPort.Type == intstr.Int && matchedPort.TargetPort.IntVal != 0 {
+				podPort = matchedPort.TargetPort.IntVal
+			} else if matchedPort.TargetPort.Type == intstr.String {
+				// For named targetPorts, we match ONLY by the Service Port name
+				// in the EndpointSlice.
+				podPort = 0
+			} else {
+				// K8s default: targetPort defaults to port if not specified
+				podPort = matchedPort.Port
+			}
+		}
 
+		// Update resolved state for EndpointSlice matching
+		k.cacheMu.Lock()
+		changed := k.resolvedPortName != portName || k.resolvedPodPort != podPort
 		k.resolvedPortName = portName
-		k.resolvedTargetPortName = targetPortName
-		k.resolvedTargetPortNumber = targetPortNumber
+		k.resolvedPodPort = podPort
 		k.cacheMu.Unlock()
 
 		// If the mapping changed and we currently have no upstreams, trigger a rebuild

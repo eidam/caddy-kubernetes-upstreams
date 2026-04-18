@@ -89,15 +89,13 @@ type Kubernetes struct {
 	// Track fallback state for logging purposes
 	isFallingBack atomic.Bool
 
-	// The resolved name of the port if a numeric port was provided that matches a Service port.
-	// This allows matching EndpointSlice ports when targetPort is used.
+	// The resolved name of the port from the Service spec.
+	// EndpointSlice ports are matched against this name if it's set.
 	resolvedPortName string
 
-	// The resolved targetPort name if the Service uses a named targetPort.
-	resolvedTargetPortName string
-
-	// The resolved targetPort number if the Service uses a numeric targetPort that differs from the Service port.
-	resolvedTargetPortNumber int32
+	// The resolved numeric pod port (targetPort).
+	// Used for matching EndpointSlice ports if resolvedPortName is empty.
+	resolvedPodPort int32
 
 	// triggerUpdate is a callback to trigger a snapshot rebuild.
 	// Only set during Provision/startInformer.
