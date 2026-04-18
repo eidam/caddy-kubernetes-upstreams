@@ -172,7 +172,11 @@ func (k *Kubernetes) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, er
 		if time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness) {
 			if k.isFallingBack.CompareAndSwap(false, true) {
 				k.metricFallback.Set(1)
-				k.logger.Warn("service fallback active; API synchronization is stale")
+				if k.client == nil {
+					k.logger.Warn("service fallback active; kubernetes API discovery is disabled")
+				} else {
+					k.logger.Warn("service fallback active; API synchronization is stale")
+				}
 			}
 			fallbackPtr := k.fallbackUpstreams.Load()
 			if fallbackPtr != nil && len(*fallbackPtr) > 0 {
@@ -240,7 +244,7 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 				Dial: fmt.Sprintf("%s:%d", host, port),
 			}}
 			k.fallbackUpstreams.Store(&fallback)
-			k.logger.Info("initialized API-based fallback upstream",
+			k.logger.Debug("initialized API-based fallback upstream",
 				zap.String("addr", fallback[0].Dial))
 			return
 		}
@@ -259,9 +263,16 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 		}}
 	}
 	k.fallbackUpstreams.Store(&fallback)
-	k.logger.Info("initialized DNS-based fallback upstream",
-		zap.String("addr", fallback[0].Dial),
-		zap.Error(err))
+
+	if err != nil && k.client != nil {
+		k.logger.Warn("initialized DNS-based fallback upstream due to API error",
+			zap.String("addr", fallback[0].Dial),
+			zap.Error(err))
+	} else {
+		k.logger.Debug("initialized DNS-based fallback upstream",
+			zap.String("addr", fallback[0].Dial),
+			zap.Error(err))
+	}
 }
 
 // UnmarshalCaddyfile unmarshals the Caddyfile.
