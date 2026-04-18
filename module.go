@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -90,23 +91,32 @@ func (k *Kubernetes) Provision(ctx caddy.Context) error {
 	go k.run(k.ctx)
 
 	// Wait for initial sync or timeout
-	select {
-	case <-k.ready:
-		if c := k.logger.Check(zapcore.DebugLevel, "initial sync complete"); c != nil {
-			c.Write(
+	if k.client != nil {
+		select {
+		case <-k.ready:
+			if c := k.logger.Check(zapcore.DebugLevel, "initial sync complete"); c != nil {
+				c.Write(
+					zap.String("namespace", k.Namespace),
+					zap.String("service", k.Service),
+				)
+			}
+		case <-time.After(time.Duration(k.StartupPollTimeout)):
+			if k.StrictInit {
+				return fmt.Errorf("initial kubernetes sync timed out after %s (strict_init=true)", time.Duration(k.StartupPollTimeout))
+			}
+			k.logger.Warn("initial sync timed out; starting anyway",
 				zap.String("namespace", k.Namespace),
-				zap.String("service", k.Service),
-			)
+				zap.String("service", k.Service))
+		case <-k.ctx.Done():
+			return k.ctx.Err()
 		}
-	case <-time.After(time.Duration(k.StartupPollTimeout)):
-		if k.StrictInit {
-			return fmt.Errorf("initial kubernetes sync timed out after %s (strict_init=true)", time.Duration(k.StartupPollTimeout))
+	} else {
+		k.logger.Info("kubernetes API discovery disabled; skipping initial sync")
+		select {
+		case <-k.ready:
+		default:
+			close(k.ready)
 		}
-		k.logger.Warn("initial sync timed out; starting anyway",
-			zap.String("namespace", k.Namespace),
-			zap.String("service", k.Service))
-	case <-k.ctx.Done():
-		return k.ctx.Err()
 	}
 
 	return nil
@@ -189,13 +199,20 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 	dnsFallback := fmt.Sprintf("%s.%s.svc", svcName, ns)
 	resolvedPort := k.Port
 
-	// Try to get explicit ClusterIP from API
-	svc, err := k.client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
-	if err != nil {
-		k.metricErrors.Inc()
+	var svc *corev1.Service
+	var err error
+
+	// Try to get explicit ClusterIP from API if client is available
+	if k.client != nil {
+		svc, err = k.client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+		if err != nil {
+			k.metricErrors.Inc()
+		}
+	} else {
+		err = fmt.Errorf("kubernetes client not initialized")
 	}
 
-	if err == nil && svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
+	if err == nil && svc != nil && svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
 		host := svc.Spec.ClusterIP
 		var port int32
 

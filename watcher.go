@@ -31,8 +31,9 @@ func (k *Kubernetes) run(ctx context.Context) {
 		}()
 	}
 
-	// Always use the informer
-	k.startInformer(ctx)
+	if k.client != nil {
+		k.startInformer(ctx)
+	}
 }
 
 func (k *Kubernetes) startInformer(ctx context.Context) {

@@ -43,7 +43,7 @@ type Kubernetes struct {
 	// The port number or name to use. If not specified, and the Service has only one port, it will be used automatically.
 	Port string `json:"port,omitempty"`
 
-	// The interval at which to poll the Kubernetes API as a fallback. Default: 15s.
+	// The interval at which the Informer resyncs its local cache. Default: 15s.
 	PollInterval caddy.Duration `json:"poll_interval,omitempty"`
 
 	// How long to wait for the initial endpoint discovery before Caddy starts. Default: 10s.
