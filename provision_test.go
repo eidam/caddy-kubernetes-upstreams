@@ -11,7 +11,7 @@ import (
 
 func TestProvision_NoK8sConfig(t *testing.T) {
 	// We want to verify that Provision doesn't return an error when K8s config is missing.
-	
+
 	// Backup and clear env
 	oldKubeconfig := os.Getenv("KUBECONFIG")
 	oldHome := os.Getenv("HOME")
