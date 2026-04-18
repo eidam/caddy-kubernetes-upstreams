@@ -112,7 +112,7 @@ This module exposes Prometheus metrics via Caddy's standard metrics endpoint (us
 
 If the Kubernetes API becomes unreachable and the local endpoint data exceeds `max_staleness` (default 1m), the module automatically routes traffic to the Service's stable **ClusterIP**.
 
-The module attempts to fetch the ClusterIP via the API during startup. If permissions are restricted, it falls back to the standard internal DNS name (`service.namespace.svc.cluster.local`).
+The module attempts to fetch the ClusterIP via the API during startup. If permissions are restricted, it falls back to the standard internal DNS name (`service.namespace.svc`).
 
 **Technical Note**: While falling back to the ClusterIP ensures connectivity, you will lose Caddy's granular Layer 7 load balancing (like `least_conn`) because Kubernetes ClusterIPs typically use Layer 4 random/probabilistic routing.
 
@@ -150,6 +150,22 @@ roleRef:
   name: caddy-upstream-reader
   apiGroup: rbac.authorization.k8s.io
 ```
+
+## Troubleshooting
+
+If Caddy is not routing correctly, enable debug logging in your global Caddyfile options:
+
+```caddyfile
+{
+    debug
+}
+```
+
+This module emits helpful diagnostics at the `DEBUG` level, such as:
+- `initial sync complete`: Confirms the Informer has populated the first batch of endpoints.
+- `could not resolve port for slice`: Indicates a mismatch between the configured port and the EndpointSlice data.
+
+You can also monitor the Prometheus metrics (e.g., `caddy_kubernetes_upstreams_fallback_active`) to see if the API connection is healthy.
 
 ## License
 

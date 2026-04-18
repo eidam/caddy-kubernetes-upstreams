@@ -186,7 +186,7 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 	svcName := k.Service
 
 	// Default DNS-based fallback
-	dnsFallback := fmt.Sprintf("%s.%s.svc.cluster.local", svcName, ns)
+	dnsFallback := fmt.Sprintf("%s.%s.svc", svcName, ns)
 	resolvedPort := k.Port
 
 	// Try to get explicit ClusterIP from API
@@ -242,7 +242,7 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 		}}
 	}
 	k.fallbackUpstreams.Store(&fallback)
-	k.logger.Warn("initialized DNS-based fallback upstream",
+	k.logger.Info("initialized DNS-based fallback upstream",
 		zap.String("addr", fallback[0].Dial),
 		zap.Error(err))
 }

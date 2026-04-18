@@ -56,7 +56,7 @@ func TestUpdateFallbackUpstreams(t *testing.T) {
 			service:       "my-svc",
 			port:          "443",
 			expectWarning: true,
-			wantAddr:      "my-svc.other-ns.svc.cluster.local:443",
+			wantAddr:      "my-svc.other-ns.svc:443",
 		},
 		{
 			name:      "Headless service - fallback to DNS",
@@ -71,7 +71,7 @@ func TestUpdateFallbackUpstreams(t *testing.T) {
 				},
 			},
 			expectWarning: true,
-			wantAddr:      "headless.default.svc.cluster.local:80",
+			wantAddr:      "headless.default.svc:80",
 		},
 	}
 
