@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -265,5 +266,36 @@ func TestResolvePort(t *testing.T) {
 				t.Errorf("resolvePort() = (%v, %v), want (%v, %v)", gotPort, gotFound, tt.wantPort, tt.wantFound)
 			}
 		})
+	}
+}
+
+func BenchmarkBuildUpstreams(b *testing.B) {
+	k := &Kubernetes{
+		Service: "test",
+		logger:  zap.NewNop(),
+	}
+
+	// Create 100 slices with 10 endpoints each
+	var slices []discoveryv1.EndpointSlice
+	for i := 0; i < 100; i++ {
+		slice := discoveryv1.EndpointSlice{
+			Ports: []discoveryv1.EndpointPort{
+				{Port: ptr.To(int32(80))},
+			},
+		}
+		for j := 0; j < 10; j++ {
+			slice.Endpoints = append(slice.Endpoints, discoveryv1.Endpoint{
+				Addresses: []string{fmt.Sprintf("10.0.%d.%d", i, j)},
+				Conditions: discoveryv1.EndpointConditions{
+					Ready: ptr.To(true),
+				},
+			})
+		}
+		slices = append(slices, slice)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = k.buildUpstreams(slices)
 	}
 }
