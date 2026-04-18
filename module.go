@@ -6,8 +6,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -20,7 +23,105 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 )
+
+const (
+	defaultPollInterval       = 15 * time.Second
+	defaultMaxStaleness       = 1 * time.Minute
+	defaultStartupPollTimeout = 10 * time.Second
+	defaultFallbackTimeout    = 5 * time.Second
+)
+
+// Kubernetes is a Caddy dynamic upstream module that discovers backend endpoints for a Kubernetes Service.
+//
+// It is designed to be a lightweight, high-performance alternative to full Ingress controllers.
+// Instead of using a global EndpointSliceInformer that listens to all services, this module
+// creates a targeted, scoped Informer for each configured service using a LabelSelector.
+// This significantly reduces resource overhead in large clusters.
+type Kubernetes struct {
+	// The Kubernetes namespace. Defaults to 'default' or the current namespace if running in-cluster.
+	Namespace string `json:"namespace,omitempty"`
+
+	// The name of the Kubernetes Service.
+	Service string `json:"service,omitempty"`
+
+	// Path to the kubeconfig file. Optional.
+	Kubeconfig string `json:"kubeconfig,omitempty"`
+
+	// The port number or name to use. If not specified, and the Service has only one port, it will be used automatically.
+	Port string `json:"port,omitempty"`
+
+	// The interval at which the Informer resyncs its local cache. Default: 15s.
+	PollInterval caddy.Duration `json:"poll_interval,omitempty"`
+
+	// How long to wait for the initial endpoint discovery before Caddy starts. Default: 10s.
+	StartupPollTimeout caddy.Duration `json:"startup_poll_timeout,omitempty"`
+
+	// Allow endpoints that have not yet passed their readiness probes. Default: false.
+	AllowUnready bool `json:"allow_unready,omitempty"`
+
+	// Allow endpoints that are in the process of terminating. Default: false.
+	AllowTerminating bool `json:"allow_terminating,omitempty"`
+
+	// How long the data can be stale before falling back to ClusterIP.
+	// Setting this > 0 enables Service Fallback. Default: 1m.
+	MaxStaleness caddy.Duration `json:"max_staleness,omitempty"`
+
+	// If true, Caddy will fail to start if the initial endpoint discovery fails or times out.
+	// Default: false.
+	StrictInit bool `json:"strict_init,omitempty"`
+
+	client            kubernetes.Interface
+	upstreams         atomic.Pointer[kubernetesSnapshot]
+	fallbackUpstreams atomic.Pointer[[]*reverseproxy.Upstream]
+	logger            *zap.Logger
+
+	// Metrics
+	metricLabels    prometheus.Labels
+	metricEndpoints prometheus.Gauge
+	metricErrors    prometheus.Counter
+	metricFallback  prometheus.Gauge
+
+	// Informer for EndpointSlices
+	informer cache.SharedIndexInformer
+	cacheMu  sync.Mutex
+
+	// Flag to track if a full rebuild is needed or just a timestamp refresh.
+	// Only modified under cacheMu.
+	needsRebuild bool
+
+	// Pool of long-lived upstream pointers to ensure stability for load balancer state.
+	// Only modified under cacheMu.
+	upstreamPool map[string]*reverseproxy.Upstream
+
+	// Track fallback state for logging purposes
+	isFallingBack atomic.Bool
+
+	// The resolved name of the port from the Service spec.
+	// EndpointSlice ports are matched against this name if it's set.
+	resolvedPortName string
+
+	// The resolved numeric pod port (targetPort).
+	// Used for matching EndpointSlice ports if resolvedPortName is empty.
+	resolvedPodPort int32
+
+	// triggerUpdate is a callback to trigger a snapshot rebuild.
+	// Only set during Provision/startInformer.
+	triggerUpdate func(rebuild bool)
+
+	ready  chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+type kubernetesSnapshot struct {
+	upstreams   []*reverseproxy.Upstream
+	LastUpdated time.Time
+}
 
 func init() {
 	caddy.RegisterModule(new(Kubernetes))
@@ -140,6 +241,52 @@ func (k *Kubernetes) provisionMetrics() {
 	// Ensure metrics start at 0
 	k.metricEndpoints.Set(0)
 	k.metricFallback.Set(0)
+}
+
+func (k *Kubernetes) initKubernetesClient() error {
+	var config *rest.Config
+	var err error
+
+	repl := caddy.NewReplacer()
+	kubeconfigPath := repl.ReplaceAll(k.Kubeconfig, "")
+
+	if kubeconfigPath != "" {
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		if err != nil {
+			return fmt.Errorf("failed to create kubernetes config from kubeconfig at %s: %v", kubeconfigPath, err)
+		}
+	} else {
+		// Try in-cluster config first
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			// Fallback to standard kubeconfig location
+			kubeconfig := os.Getenv("KUBECONFIG")
+			if kubeconfig == "" {
+				home, _ := os.UserHomeDir()
+				kubeconfig = filepath.Join(home, ".kube", "config")
+			}
+
+			// Check if the kubeconfig file exists before trying to build from it.
+			// If it doesn't exist and we're not in-cluster, we just skip API discovery.
+			if _, statErr := os.Stat(kubeconfig); os.IsNotExist(statErr) {
+				k.logger.Warn("no kubernetes configuration found; API discovery will be disabled",
+					zap.String("tried", kubeconfig))
+				return nil
+			}
+
+			config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+			if err != nil {
+				return fmt.Errorf("failed to create kubernetes config: %v", err)
+			}
+		}
+	}
+
+	k.client, err = kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client: %v", err)
+	}
+
+	return nil
 }
 
 // Validate validates the configuration.
@@ -421,4 +568,14 @@ var (
 		Name:      "fallback_active",
 		Help:      "Whether the module is currently routing via the Service Fallback (1) or fine-grained pods (0).",
 	}, []string{"namespace", "service", "port"})
+)
+
+// Interface guards
+var (
+	_ caddy.Module                = (*Kubernetes)(nil)
+	_ caddy.Provisioner           = (*Kubernetes)(nil)
+	_ caddy.Validator             = (*Kubernetes)(nil)
+	_ caddy.CleanerUpper          = (*Kubernetes)(nil)
+	_ reverseproxy.UpstreamSource = (*Kubernetes)(nil)
+	_ caddyfile.Unmarshaler       = (*Kubernetes)(nil)
 )

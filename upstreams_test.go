@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -399,7 +402,7 @@ func TestComprehensivePortResolution(t *testing.T) {
 			},
 			slicePorts: []discoveryv1.EndpointPort{
 				{
-					Name: ptr.To("http"), // Correct: matches Service Port name
+					Name: ptr.To("http"), // Matches Service Port name
 					Port: ptr.To(int32(9292)),
 				},
 			},
@@ -537,10 +540,8 @@ func TestComprehensivePortResolution(t *testing.T) {
 				logger:    zap.NewNop(),
 			}
 
-			// 1. Resolve mapping from API
 			k.updateFallbackUpstreams(ctx)
 
-			// 2. Test fine-grained resolution
 			gotPort, gotFound := k.resolvePort(tt.slicePorts)
 			if gotFound != tt.wantFound {
 				t.Errorf("resolvePort() found = %v, want %v", gotFound, tt.wantFound)
@@ -549,6 +550,142 @@ func TestComprehensivePortResolution(t *testing.T) {
 				t.Errorf("resolvePort() port = %v, want %v", gotPort, tt.wantPort)
 			}
 		})
+	}
+}
+
+func TestUpdateFallbackUpstreams(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		namespace   string
+		service     string
+		port        string
+		existingSvc *corev1.Service
+		wantAddr    string
+	}{
+		{
+			name:      "API success with ClusterIP",
+			namespace: "default",
+			service:   "my-svc",
+			port:      "80",
+			existingSvc: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.96.0.10",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+			wantAddr: "10.96.0.10:80",
+		},
+		{
+			name:      "API success with named port",
+			namespace: "default",
+			service:   "my-svc",
+			port:      "http",
+			existingSvc: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.96.0.10",
+					Ports:     []corev1.ServicePort{{Name: "http", Port: 8080}},
+				},
+			},
+			wantAddr: "10.96.0.10:8080",
+		},
+		{
+			name:      "API failure (missing service) - fallback to DNS",
+			namespace: "other-ns",
+			service:   "my-svc",
+			port:      "443",
+			wantAddr:  "my-svc.other-ns.svc:443",
+		},
+		{
+			name:      "Headless service - fallback to DNS",
+			namespace: "default",
+			service:   "headless",
+			port:      "80",
+			existingSvc: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "headless", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Ports:     []corev1.ServicePort{{Port: 80}},
+				},
+			},
+			wantAddr: "headless.default.svc:80",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var client *fake.Clientset
+			if tt.existingSvc != nil {
+				client = fake.NewSimpleClientset(tt.existingSvc)
+			} else {
+				client = fake.NewSimpleClientset()
+			}
+
+			k := &Kubernetes{
+				Namespace: tt.namespace,
+				Service:   tt.service,
+				Port:      tt.port,
+				client:    client,
+				logger:    zap.NewNop(),
+			}
+			k.provisionMetrics()
+			k.updateFallbackUpstreams(ctx)
+
+			fallbackPtr := k.fallbackUpstreams.Load()
+			if fallbackPtr == nil {
+				t.Fatalf("Expected fallback upstreams to be populated")
+			}
+			fallback := *fallbackPtr
+
+			if len(fallback) != 1 {
+				t.Fatalf("Expected 1 fallback upstream, got %d", len(fallback))
+			}
+			if fallback[0].Dial != tt.wantAddr {
+				t.Errorf("Fallback Dial = %v, want %v", fallback[0].Dial, tt.wantAddr)
+			}
+		})
+	}
+}
+
+func TestGetUpstreams_ImmediateFallback(t *testing.T) {
+	k := &Kubernetes{
+		MaxStaleness: caddy.Duration(time.Minute),
+		logger:       zap.NewNop(),
+	}
+	fallback := []*reverseproxy.Upstream{{Dial: "fallback:80"}}
+	k.fallbackUpstreams.Store(&fallback)
+	k.provisionMetrics()
+
+	// 1. Initial state: LastUpdated is zero time
+	k.upstreams.Store(&kubernetesSnapshot{
+		upstreams:   []*reverseproxy.Upstream{},
+		LastUpdated: time.Time{},
+	})
+
+	// 2. GetUpstreams should IMMEDIATELY return fallback because zero-time is way older than MaxStaleness
+	ups, err := k.GetUpstreams(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 1 || ups[0].Dial != "fallback:80" {
+		t.Errorf("Expected immediate fallback, got %v", ups)
+	}
+
+	// 3. After a sync, it should return normal upstreams
+	k.upstreams.Store(&kubernetesSnapshot{
+		upstreams:   []*reverseproxy.Upstream{{Dial: "pod:80"}},
+		LastUpdated: time.Now(),
+	})
+
+	ups, err = k.GetUpstreams(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 1 || ups[0].Dial != "pod:80" {
+		t.Errorf("Expected pod upstream after sync, got %v", ups)
 	}
 }
 
