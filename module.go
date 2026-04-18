@@ -219,25 +219,40 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 	if err == nil && svc != nil && svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
 		host := svc.Spec.ClusterIP
 		var port int32
+		var portName string
 
 		// Resolve port number
 		if resolvedPort == "" {
 			if len(svc.Spec.Ports) == 1 {
 				port = svc.Spec.Ports[0].Port
+				portName = svc.Spec.Ports[0].Name
 			}
 		} else {
 			if pInt, err := strconv.Atoi(resolvedPort); err == nil {
-				port = int32(pInt)
+				// Search by port number in Service
+				for _, p := range svc.Spec.Ports {
+					if p.Port == int32(pInt) {
+						port = p.Port
+						portName = p.Name
+						break
+					}
+				}
 			} else {
-				// Try by name
+				// Search by name in Service
 				for _, p := range svc.Spec.Ports {
 					if p.Name == resolvedPort {
 						port = p.Port
+						portName = p.Name
 						break
 					}
 				}
 			}
 		}
+
+		// Update resolvedPortName for EndpointSlice matching
+		k.cacheMu.Lock()
+		k.resolvedPortName = portName
+		k.cacheMu.Unlock()
 
 		if port > 0 {
 			fallback := []*reverseproxy.Upstream{{

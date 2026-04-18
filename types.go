@@ -89,6 +89,10 @@ type Kubernetes struct {
 	// Track fallback state for logging purposes
 	isFallingBack atomic.Bool
 
+	// The resolved name of the port if a numeric port was provided that matches a Service port.
+	// This allows matching EndpointSlice ports when targetPort is used.
+	resolvedPortName string
+
 	ready  chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc

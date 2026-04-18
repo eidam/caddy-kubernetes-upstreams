@@ -203,7 +203,7 @@ func TestBuildUpstreams_IPv6(t *testing.T) {
 }
 
 func TestResolvePort(t *testing.T) {
-	ports := []discoveryv1.EndpointPort{
+	defaultPorts := []discoveryv1.EndpointPort{
 		{
 			Name: ptr.To("http"),
 			Port: ptr.To(int32(80)),
@@ -215,57 +215,140 @@ func TestResolvePort(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		port      string
-		wantPort  int32
-		wantFound bool
+		name             string
+		port             string
+		resolvedPortName string
+		ports            []discoveryv1.EndpointPort
+		wantPort         int32
+		wantFound        bool
 	}{
 		{
 			name:      "by name http",
 			port:      "http",
+			ports:     defaultPorts,
 			wantPort:  80,
 			wantFound: true,
 		},
 		{
 			name:      "by name https",
 			port:      "https",
+			ports:     defaultPorts,
 			wantPort:  443,
 			wantFound: true,
 		},
 		{
 			name:      "by number 80",
 			port:      "80",
+			ports:     defaultPorts,
 			wantPort:  80,
 			wantFound: true,
 		},
 		{
 			name:      "by number 443",
 			port:      "443",
+			ports:     defaultPorts,
 			wantPort:  443,
 			wantFound: true,
 		},
 		{
 			name:      "name not found",
 			port:      "foo",
+			ports:     defaultPorts,
 			wantFound: false,
 		},
 		{
 			name:      "number not found",
 			port:      "8080",
+			ports:     defaultPorts,
 			wantFound: false,
+		},
+		{
+			name:             "targetPort mapping: requested 80, resolved to http, matches slice port 8080",
+			port:             "80",
+			resolvedPortName: "http",
+			ports: []discoveryv1.EndpointPort{
+				{
+					Name: ptr.To("http"),
+					Port: ptr.To(int32(8080)),
+				},
+			},
+			wantPort:  8080,
+			wantFound: true,
+		},
+		{
+			name:             "unnamed port match: requested 80, no name in service, matches slice port 80",
+			port:             "80",
+			resolvedPortName: "",
+			ports: []discoveryv1.EndpointPort{
+				{
+					Port: ptr.To(int32(80)),
+				},
+			},
+			wantPort:  80,
+			wantFound: true,
+		},
+		{
+			name:             "name mismatch: requested 80, resolved to http, slice has only https",
+			port:             "80",
+			resolvedPortName: "http",
+			ports: []discoveryv1.EndpointPort{
+				{
+					Name: ptr.To("https"),
+					Port: ptr.To(int32(443)),
+				},
+			},
+			wantFound: false,
+		},
+		{
+			name:             "direct name match in config: requested 'http', matches slice port 80",
+			port:             "http",
+			resolvedPortName: "http",
+			ports: []discoveryv1.EndpointPort{
+				{
+					Name: ptr.To("http"),
+					Port: ptr.To(int32(80)),
+				},
+			},
+			wantPort:  80,
+			wantFound: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			k := &Kubernetes{
-				Port: tt.port,
+				Port:             tt.port,
+				resolvedPortName: tt.resolvedPortName,
 			}
-			gotPort, gotFound := k.resolvePort(ports)
+			gotPort, gotFound := k.resolvePort(tt.ports)
 			if gotPort != tt.wantPort || gotFound != tt.wantFound {
 				t.Errorf("resolvePort() = (%v, %v), want (%v, %v)", gotPort, gotFound, tt.wantPort, tt.wantFound)
 			}
 		})
+	}
+}
+
+func TestResolvePort_TargetPort(t *testing.T) {
+	// Scenario: Service has port 80 named "http" with targetPort 8080.
+	// EndpointSlice has port 8080 named "http".
+	ports := []discoveryv1.EndpointPort{
+		{
+			Name: ptr.To("http"),
+			Port: ptr.To(int32(8080)),
+		},
+	}
+
+	k := &Kubernetes{
+		Port:             "80",   // User requested port 80
+		resolvedPortName: "http", // We resolved 80 -> "http" from Service
+	}
+
+	gotPort, gotFound := k.resolvePort(ports)
+	if !gotFound {
+		t.Fatal("expected to resolve port")
+	}
+	if gotPort != 8080 {
+		t.Errorf("got port %d, want 8080", gotPort)
 	}
 }
 
