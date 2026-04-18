@@ -98,6 +98,23 @@ reverse_proxy {
 - **Service Fallback**: Automatically falls back to the stable ClusterIP if the API becomes unreachable.
 - **Native IPv6**: Uses `net.JoinHostPort` for correct bracketing in dual-stack clusters.
 
+## Design Philosophy & Efficiency
+
+This module is designed to be a **lightweight, zero-compromise** alternative for users who want the power of Caddy's load balancing without the overhead of a full Ingress Controller or the latency of DNS.
+
+### Performance & Resource Usage
+Unlike standard Kubernetes controllers that use the generic `EndpointSliceInformer` from a `SharedInformerFactory`, this module creates a **targeted, scoped Informer** for each configured service.
+
+- **Selective Listening**: Standard Informers listen to *every* `EndpointSlice` in a namespace (or cluster). If your cluster has 1,000 services, a standard Informer would process updates for all of them.
+- **Resource Efficiency**: By using a custom `ListWatch` with a specific `LabelSelector` (`kubernetes.io/service-name`), this module ensures that Caddy only receives and processes updates for the specific services it is actually proxying. This significantly reduces CPU and memory overhead in large clusters.
+
+### When to use Ingress or Gateway API
+This module is ideal for "static-dynamic" setups where you have a known set of backend services. If you find yourself configuring dozens or hundreds of `dynamic kubernetes` blocks, you are likely better off using:
+- **[Caddy Ingress Controller](https://github.com/caddyserver/ingress)**
+- **[Caddy Gateway API](https://github.com/caddyserver/gateway)**
+
+Those solutions are optimized for cluster-wide routing at scale, whereas this module is optimized for **maximum performance and simplicity** for individual services.
+
 ## Observability (Metrics)
 
 This module exposes Prometheus metrics via Caddy's standard metrics endpoint (usually `:2019/metrics`). All metrics include `namespace`, `service`, and `port` labels.

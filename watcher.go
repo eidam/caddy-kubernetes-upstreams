@@ -36,6 +36,19 @@ func (k *Kubernetes) run(ctx context.Context) {
 }
 
 func (k *Kubernetes) startInformer(ctx context.Context) {
+	// We use a custom ListWatch with a specific LabelSelector instead of a 
+	// standard EndpointSliceInformer from a SharedInformerFactory.
+	// 
+	// This is a deliberate design choice:
+	// 1. Efficiency: Standard Informers listen to ALL EndpointSlices in the 
+	//    namespace/cluster. By scoping the watch to a specific service, we 
+	//    drastically reduce CPU/memory overhead and network traffic, especially 
+	//    in large clusters with thousands of services.
+	// 2. Lightweight: It avoids the dependency on a global SharedInformerFactory,
+	//    keeping the module self-contained and easy to initialize.
+	//
+	// If a user needs many upstreams, they are likely better served by a 
+	// full Ingress or Gateway controller.
 	labelSelector := "kubernetes.io/service-name=" + k.Service
 
 	listWatch := &cache.ListWatch{

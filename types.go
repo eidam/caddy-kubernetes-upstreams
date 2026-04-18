@@ -23,6 +23,13 @@ const (
 )
 
 // Kubernetes is a Caddy dynamic upstream module that discovers backend endpoints for a Kubernetes Service.
+//
+// It is designed to be a lightweight, high-performance alternative to full Ingress controllers.
+// Instead of using a global EndpointSliceInformer that listens to all services, this module
+// creates a targeted, scoped Informer for each configured service using a LabelSelector.
+// This significantly reduces resource overhead in large clusters.
+//
+// If you need to manage hundreds of upstreams, consider using a full Caddy Ingress controller instead.
 type Kubernetes struct {
 	// The Kubernetes namespace. Defaults to 'default' or the current namespace if running in-cluster.
 	Namespace string `json:"namespace,omitempty"`
