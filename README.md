@@ -94,8 +94,8 @@ reverse_proxy {
 - **Debounced Updates**: Coalesces rapid watch events (100ms window) to prevent CPU spikes during large deployments.
 - **O(1) Hot Path**: Zero-lock request path using atomic snapshot swaps.
 - **LB State Stability**: Reuses `Upstream` pointers to preserve load balancer state (e.g., `least_conn` counts).
-- **Resilient Startup**: Automatically falls back to the stable ClusterIP immediately if the API is slow during startup.
-- **Service Fallback**: Automatically falls back to the stable ClusterIP if the API becomes unreachable.
+- **Auto-Healing & Resilience**: Automatically falls back to the stable ClusterIP if the API becomes unreachable or slow, ensuring zero downtime.
+- **Resilient Startup**: Caddy will start even if the Kubernetes API is down by using the stable Service address.
 - **Native IPv6**: Uses `net.JoinHostPort` for correct bracketing in dual-stack clusters.
 
 ## Design Philosophy & Efficiency
