@@ -131,7 +131,7 @@ If the Kubernetes API becomes unreachable and the local endpoint data exceeds `m
 
 The module attempts to fetch the ClusterIP via the API during startup. If permissions are restricted, it falls back to the standard internal DNS name (`service.namespace.svc`).
 
-**Technical Note**: While falling back to the ClusterIP ensures connectivity, you will lose Caddy's granular Layer 7 load balancing (like `least_conn`) because Kubernetes ClusterIPs typically use Layer 4 random/probabilistic routing.
+**Technical Note**: While falling back to the ClusterIP ensures connectivity, you will temporarily lose Caddy's granular Layer 7 load balancing (like `least_conn`) because Kubernetes ClusterIPs typically use Layer 4 random/probabilistic routing. This is a deliberate trade-off: a slightly less efficient load balancing strategy is significantly better than a full service outage during rare API discovery failures.
 
 ## Permissions (RBAC)
 
