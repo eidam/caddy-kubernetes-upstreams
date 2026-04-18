@@ -10,6 +10,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 )
 
 func TestMetrics_Values(t *testing.T) {
@@ -32,10 +33,10 @@ func TestMetrics_Values(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "s1"},
 			Endpoints: []discoveryv1.Endpoint{
-				{Addresses: []string{"10.0.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)}},
-				{Addresses: []string{"10.0.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)}},
+				{Addresses: []string{"10.0.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
+				{Addresses: []string{"10.0.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}},
 			},
-			Ports: []discoveryv1.EndpointPort{{Port: int32Ptr(80)}},
+			Ports: []discoveryv1.EndpointPort{{Port: ptr.To(int32(80))}},
 		},
 	}
 
