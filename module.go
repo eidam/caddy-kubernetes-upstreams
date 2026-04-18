@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func init() {
@@ -167,19 +169,26 @@ func (k *Kubernetes) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, er
 		return nil, nil
 	}
 
-	// Degraded mode: fallback if stale (MaxStaleness > 0 enables this)
+	// Degraded mode: fallback if stale or empty (MaxStaleness > 0 enables this)
 	if k.MaxStaleness > 0 {
-		if time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness) {
-			if k.isFallingBack.CompareAndSwap(false, true) {
-				k.metricFallback.Set(1)
-				if k.client == nil {
-					k.logger.Warn("service fallback active; kubernetes API discovery is disabled")
-				} else {
-					k.logger.Warn("service fallback active; API synchronization is stale")
-				}
-			}
+		isStale := time.Since(snap.LastUpdated) > time.Duration(k.MaxStaleness)
+		isEmpty := len(snap.upstreams) == 0
+
+		if isStale || isEmpty {
 			fallbackPtr := k.fallbackUpstreams.Load()
 			if fallbackPtr != nil && len(*fallbackPtr) > 0 {
+				if k.isFallingBack.CompareAndSwap(false, true) {
+					k.metricFallback.Set(1)
+					if isStale {
+						if k.client == nil {
+							k.logger.Warn("service fallback active; kubernetes API discovery is disabled")
+						} else {
+							k.logger.Warn("service fallback active; API synchronization is stale")
+						}
+					} else {
+						k.logger.Warn("service fallback active; no fine-grained endpoints found")
+					}
+				}
 				fallback := *fallbackPtr
 				upstreams := make([]*reverseproxy.Upstream, len(fallback))
 				copy(upstreams, fallback)
@@ -206,7 +215,7 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 	var svc *corev1.Service
 	var err error
 
-	// Try to get explicit ClusterIP from API if client is available
+	// Try to get explicit Service info from API if client is available
 	if k.client != nil {
 		svc, err = k.client.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
 		if err != nil {
@@ -216,16 +225,23 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 		err = fmt.Errorf("kubernetes client not initialized")
 	}
 
-	if err == nil && svc != nil && svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
-		host := svc.Spec.ClusterIP
-		var port int32
-		var portName string
+	var port int32
+	var portName string
+	var targetPortName string
+	var targetPortNumber int32
 
-		// Resolve port number
+	if err == nil && svc != nil {
+		// Resolve port details from Service
 		if resolvedPort == "" {
 			if len(svc.Spec.Ports) == 1 {
-				port = svc.Spec.Ports[0].Port
-				portName = svc.Spec.Ports[0].Name
+				p := svc.Spec.Ports[0]
+				port = p.Port
+				portName = p.Name
+				if p.TargetPort.Type == intstr.String {
+					targetPortName = p.TargetPort.StrVal
+				} else if p.TargetPort.Type == intstr.Int && p.TargetPort.IntVal != 0 {
+					targetPortNumber = p.TargetPort.IntVal
+				}
 			}
 		} else {
 			if pInt, err := strconv.Atoi(resolvedPort); err == nil {
@@ -234,6 +250,11 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 					if p.Port == int32(pInt) {
 						port = p.Port
 						portName = p.Name
+						if p.TargetPort.Type == intstr.String {
+							targetPortName = p.TargetPort.StrVal
+						} else if p.TargetPort.Type == intstr.Int && p.TargetPort.IntVal != 0 {
+							targetPortNumber = p.TargetPort.IntVal
+						}
 						break
 					}
 				}
@@ -243,50 +264,69 @@ func (k *Kubernetes) updateFallbackUpstreams(ctx context.Context) {
 					if p.Name == resolvedPort {
 						port = p.Port
 						portName = p.Name
+						if p.TargetPort.Type == intstr.String {
+							targetPortName = p.TargetPort.StrVal
+						} else if p.TargetPort.Type == intstr.Int && p.TargetPort.IntVal != 0 {
+							targetPortNumber = p.TargetPort.IntVal
+						}
 						break
 					}
 				}
 			}
 		}
 
-		// Update resolvedPortName for EndpointSlice matching
+		// Update resolved names for EndpointSlice matching
 		k.cacheMu.Lock()
+		changed := k.resolvedPortName != portName ||
+			k.resolvedTargetPortName != targetPortName ||
+			k.resolvedTargetPortNumber != targetPortNumber
+
 		k.resolvedPortName = portName
+		k.resolvedTargetPortName = targetPortName
+		k.resolvedTargetPortNumber = targetPortNumber
 		k.cacheMu.Unlock()
 
-		if port > 0 {
-			fallback := []*reverseproxy.Upstream{{
-				Dial: fmt.Sprintf("%s:%d", host, port),
-			}}
-			k.fallbackUpstreams.Store(&fallback)
-			k.logger.Debug("initialized API-based fallback upstream",
-				zap.String("addr", fallback[0].Dial))
-			return
+		// If the mapping changed and we currently have no upstreams, trigger a rebuild
+		// to recover from "could not resolve port" state immediately.
+		if changed && k.triggerUpdate != nil {
+			snap := k.upstreams.Load()
+			if snap == nil || len(snap.upstreams) == 0 {
+				k.triggerUpdate(true)
+			}
 		}
 	}
 
-	// Fallback to DNS if API failed or port not resolved
-	var fallback []*reverseproxy.Upstream
-	if resolvedPort != "" {
-		fallback = []*reverseproxy.Upstream{{
-			Dial: fmt.Sprintf("%s:%s", dnsFallback, resolvedPort),
-		}}
+	// Determine new fallback address
+	var newDial string
+	isAPI := false
+	if err == nil && svc != nil && port > 0 && svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
+		newDial = net.JoinHostPort(svc.Spec.ClusterIP, strconv.Itoa(int(port)))
+		isAPI = true
+	} else if resolvedPort != "" {
+		newDial = net.JoinHostPort(dnsFallback, resolvedPort)
 	} else {
-		// We don't even have a port, fallback is partial but better than nothing
-		fallback = []*reverseproxy.Upstream{{
-			Dial: dnsFallback,
-		}}
+		newDial = dnsFallback
 	}
-	k.fallbackUpstreams.Store(&fallback)
 
-	if err != nil && k.client != nil {
-		k.logger.Warn("initialized DNS-based fallback upstream due to API error",
-			zap.String("addr", fallback[0].Dial),
-			zap.Error(err))
-	} else {
-		k.logger.Debug("initialized DNS-based fallback upstream",
-			zap.String("addr", fallback[0].Dial),
-			zap.Error(err))
+	// Only store and log if it changed
+	oldFallback := k.fallbackUpstreams.Load()
+	if oldFallback == nil || len(*oldFallback) == 0 || (*oldFallback)[0].Dial != newDial {
+		fallback := []*reverseproxy.Upstream{{Dial: newDial}}
+		k.fallbackUpstreams.Store(&fallback)
+
+		if isAPI {
+			k.logger.Debug("initialized API-based fallback upstream",
+				zap.String("addr", newDial))
+		} else {
+			if err != nil && k.client != nil {
+				k.logger.Warn("initialized DNS-based fallback upstream due to API error",
+					zap.String("addr", newDial),
+					zap.Error(err))
+			} else {
+				k.logger.Debug("initialized DNS-based fallback upstream",
+					zap.String("addr", newDial))
+			}
+		}
 	}
 }
 

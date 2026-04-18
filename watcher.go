@@ -82,7 +82,7 @@ func (k *Kubernetes) startInformer(ctx context.Context) {
 	var coalesceTimer *time.Timer
 	updatePending := false
 
-	triggerUpdate := func(rebuild bool) {
+	k.triggerUpdate = func(rebuild bool) {
 		k.cacheMu.Lock()
 		defer k.cacheMu.Unlock()
 
@@ -117,15 +117,15 @@ func (k *Kubernetes) startInformer(ctx context.Context) {
 
 	k.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			triggerUpdate(true)
+			k.triggerUpdate(true)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			// oldObj == newObj indicates a periodic resync (heartbeat)
 			// rather than an actual change in the Kubernetes cluster.
-			triggerUpdate(oldObj != newObj)
+			k.triggerUpdate(oldObj != newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			triggerUpdate(true)
+			k.triggerUpdate(true)
 		},
 	})
 

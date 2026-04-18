@@ -1,13 +1,17 @@
 package kubernetes
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
 
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 )
 
@@ -328,27 +332,262 @@ func TestResolvePort(t *testing.T) {
 	}
 }
 
-func TestResolvePort_TargetPort(t *testing.T) {
-	// Scenario: Service has port 80 named "http" with targetPort 8080.
-	// EndpointSlice has port 8080 named "http".
-	ports := []discoveryv1.EndpointPort{
+func TestComprehensivePortResolution(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		requestedPort string
+		service       *corev1.Service
+		slicePorts    []discoveryv1.EndpointPort
+		wantPort      int32
+		wantFound     bool
+	}{
 		{
-			Name: ptr.To("http"),
-			Port: ptr.To(int32(8080)),
+			name:          "Scenario 1: Simple Numeric Match (No Names)",
+			requestedPort: "80",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{{Port: 80}},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Port: ptr.To(int32(80))},
+			},
+			wantPort:  80,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 2: TargetPort Numeric Mapping",
+			requestedPort: "80",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt32(8080)}},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Port: ptr.To(int32(8080))},
+			},
+			wantPort:  8080,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 3: TargetPort Name Mapping (Flux Case)",
+			requestedPort: "80",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "webhook-receiver", Namespace: "flux-system"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Name:       "http",
+							Port:       80,
+							TargetPort: intstr.FromString("http-webhook"),
+						},
+					},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{
+					Name: ptr.To("http-webhook"),
+					Port: ptr.To(int32(9292)),
+				},
+			},
+			wantPort:  9292,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 4: Named Port Request",
+			requestedPort: "https",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80},
+						{Name: "https", Port: 443},
+					},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("http"), Port: ptr.To(int32(80))},
+				{Name: ptr.To("https"), Port: ptr.To(int32(443))},
+			},
+			wantPort:  443,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 5: Multi-port Auto-selection (Requested Port Empty)",
+			requestedPort: "",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "metrics", Port: 9090},
+					},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("metrics"), Port: ptr.To(int32(9090))},
+			},
+			wantPort:  9090,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 6: Multi-port Selection by Number",
+			requestedPort: "443",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80},
+						{Name: "https", Port: 443},
+					},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("http"), Port: ptr.To(int32(80))},
+				{Name: ptr.To("https"), Port: ptr.To(int32(443))},
+			},
+			wantPort:  443,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 7: Mismatch - Port in Service but not in Slice",
+			requestedPort: "80",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromString("web")}},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("wrong"), Port: ptr.To(int32(8080))},
+			},
+			wantFound: false,
+		},
+		{
+			name:          "Scenario 8: Headless Service Mapping",
+			requestedPort: "80",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "headless", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Ports:     []corev1.ServicePort{{Name: "web", Port: 80}},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("web"), Port: ptr.To(int32(8080))},
+			},
+			wantPort:  8080,
+			wantFound: true,
+		},
+		{
+			name:          "Scenario 9: Service Port Number matches Slice Port Number but Names Differ",
+			requestedPort: "80",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80}},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("legacy"), Port: ptr.To(int32(80))},
+			},
+			wantPort:  80,
+			wantFound: true, // Should still match by number if name didn't match
+		},
+		{
+			name:          "Scenario 10: Mixed TargetPort Types in Service",
+			requestedPort: "8080",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "web", Port: 80, TargetPort: intstr.FromString("http")},
+						{Name: "admin", Port: 8080, TargetPort: intstr.FromInt32(9090)},
+					},
+				},
+			},
+			slicePorts: []discoveryv1.EndpointPort{
+				{Name: ptr.To("admin"), Port: ptr.To(int32(9090))},
+			},
+			wantPort:  9090,
+			wantFound: true,
 		},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset(tt.service)
+			k := &Kubernetes{
+				Namespace: tt.service.Namespace,
+				Service:   tt.service.Name,
+				Port:      tt.requestedPort,
+				client:    client,
+				logger:    zap.NewNop(),
+			}
+
+			// 1. Resolve mapping from API
+			k.updateFallbackUpstreams(ctx)
+
+			// 2. Test fine-grained resolution
+			gotPort, gotFound := k.resolvePort(tt.slicePorts)
+			if gotFound != tt.wantFound {
+				t.Errorf("resolvePort() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if tt.wantFound && gotPort != tt.wantPort {
+				t.Errorf("resolvePort() port = %v, want %v", gotPort, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestRebuildOnMappingChange(t *testing.T) {
+	ctx := context.Background()
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Name: "old", Port: 80, TargetPort: intstr.FromString("v1")}},
+		},
+	}
+	client := fake.NewSimpleClientset(svc)
+
+	rebuildCalled := 0
 	k := &Kubernetes{
-		Port:             "80",   // User requested port 80
-		resolvedPortName: "http", // We resolved 80 -> "http" from Service
+		Namespace: "default",
+		Service:   "svc",
+		Port:      "80",
+		client:    client,
+		logger:    zap.NewNop(),
+		triggerUpdate: func(rebuild bool) {
+			if rebuild {
+				rebuildCalled++
+			}
+		},
 	}
 
-	gotPort, gotFound := k.resolvePort(ports)
-	if !gotFound {
-		t.Fatal("expected to resolve port")
+	// First run - populates initial mapping
+	k.updateFallbackUpstreams(ctx)
+	if rebuildCalled != 1 {
+		t.Errorf("Expected rebuild on initial mapping discovery, got %d", rebuildCalled)
 	}
-	if gotPort != 8080 {
-		t.Errorf("got port %d, want 8080", gotPort)
+
+	// Update service in fake client
+	svc.Spec.Ports[0].TargetPort = intstr.FromString("v2")
+	client.CoreV1().Services("default").Update(ctx, svc, metav1.UpdateOptions{})
+
+	// Second run - should detect change and trigger rebuild
+	k.updateFallbackUpstreams(ctx)
+	if rebuildCalled != 2 {
+		t.Errorf("Expected second rebuild on mapping change, got %d", rebuildCalled)
+	}
+
+	// Third run - no change, no rebuild
+	k.updateFallbackUpstreams(ctx)
+	if rebuildCalled != 2 {
+		t.Errorf("Expected no rebuild when mapping is identical, got %d", rebuildCalled)
 	}
 }
 

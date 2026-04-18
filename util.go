@@ -30,13 +30,15 @@ func (k *Kubernetes) resolvePort(ports []discoveryv1.EndpointPort) (int32, bool)
 		return 0, false
 	}
 
-	// Try as name (either configured name or resolved name from service port number)
+	// Try as name (configured name, resolved Service port name, or resolved targetPort name)
 	// This takes precedence because if we resolved a numeric Service port to a name,
 	// we MUST use that name to find the correct port in the EndpointSlice (which
 	// might have a different numeric port if targetPort is used).
 	for _, p := range ports {
 		if p.Name != nil {
-			if *p.Name == k.Port || (k.resolvedPortName != "" && *p.Name == k.resolvedPortName) {
+			if *p.Name == k.Port ||
+				(k.resolvedPortName != "" && *p.Name == k.resolvedPortName) ||
+				(k.resolvedTargetPortName != "" && *p.Name == k.resolvedTargetPortName) {
 				if p.Port != nil {
 					return *p.Port, true
 				}
@@ -44,10 +46,10 @@ func (k *Kubernetes) resolvePort(ports []discoveryv1.EndpointPort) (int32, bool)
 		}
 	}
 
-	// Try numeric second
+	// Try numeric (either configured numeric port, or resolved numeric targetPort)
 	if pInt, err := strconv.Atoi(k.Port); err == nil {
 		for _, p := range ports {
-			if p.Port != nil && *p.Port == int32(pInt) {
+			if p.Port != nil && (*p.Port == int32(pInt) || (k.resolvedTargetPortNumber != 0 && *p.Port == k.resolvedTargetPortNumber)) {
 				return *p.Port, true
 			}
 		}

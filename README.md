@@ -127,7 +127,9 @@ This module exposes Prometheus metrics via Caddy's standard metrics endpoint (us
 
 ## Service Fallback
 
-If the Kubernetes API becomes unreachable and the local endpoint data exceeds `max_staleness` (default 1m), the module automatically routes traffic to the Service's stable **ClusterIP**.
+If the fine-grained pod discovery fails (e.g., due to intermittent Kubernetes API issues, port resolution delays, or 0 healthy pods), the module will automatically fallback to the Service's ClusterIP (or DNS name) to ensure high availability and prevent 503 errors.
+
+This behavior kicks in if the local endpoint data exceeds `max_staleness` (default 1m) OR if discovery returns zero endpoints. As long as `max_staleness` is greater than 0, Caddy will prefer the most reliable path available rather than returning an empty list of upstreams.
 
 The module attempts to fetch the ClusterIP via the API during startup. If permissions are restricted, it falls back to the standard internal DNS name (`service.namespace.svc`).
 

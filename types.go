@@ -93,6 +93,16 @@ type Kubernetes struct {
 	// This allows matching EndpointSlice ports when targetPort is used.
 	resolvedPortName string
 
+	// The resolved targetPort name if the Service uses a named targetPort.
+	resolvedTargetPortName string
+
+	// The resolved targetPort number if the Service uses a numeric targetPort that differs from the Service port.
+	resolvedTargetPortNumber int32
+
+	// triggerUpdate is a callback to trigger a snapshot rebuild.
+	// Only set during Provision/startInformer.
+	triggerUpdate func(rebuild bool)
+
 	ready  chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
